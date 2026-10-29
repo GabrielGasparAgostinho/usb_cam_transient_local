@@ -44,11 +44,11 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions & node_options)
   m_camera(new usb_cam::UsbCam()),
   m_image_msg(new sensor_msgs::msg::Image()),
   m_compressed_img_msg(nullptr),
-  m_image_publisher(std::make_shared<image_transport::CameraPublisher>(
-      image_transport::create_camera_publisher(this, BASE_TOPIC_NAME,
-      rclcpp::QoS {100}.get_rmw_qos_profile()))),
+  m_image_publisher(image_transport::create_publisher(this, BASE_TOPIC_NAME,
+      rclcpp::QoS {100}.get_rmw_qos_profile())),
   m_compressed_image_publisher(nullptr),
-  m_compressed_cam_info_publisher(nullptr),
+  m_camera_info_publisher(nullptr),
+  m_camera_info_published(false),
   m_parameters(),
   m_camera_info_msg(new sensor_msgs::msg::CameraInfo()),
   m_service_capture(
@@ -84,6 +84,7 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions & node_options)
   this->declare_parameter("autofocus", false);
   this->declare_parameter("focus", -1);  // 0-255, -1 "leave alone"
   this->declare_parameter("skip_device_check", false);  // allow bypassing V4L2 device list check
+  this->declare_parameter("publish_camera_info_once", true);  // publish camera_info once with transient_local
 
   get_params();
   init();
@@ -100,6 +101,8 @@ UsbCamNode::~UsbCamNode()
   m_compressed_img_msg.reset();
   m_camera_info_msg.reset();
   m_camera_info.reset();
+  m_camera_info_publisher.reset();
+  m_compressed_image_publisher.reset();
   m_timer.reset();
   m_publish_timer.reset();
   m_service_capture.reset();
@@ -190,10 +193,12 @@ void UsbCamNode::init()
     m_compressed_image_publisher =
       this->create_publisher<sensor_msgs::msg::CompressedImage>(
       std::string(BASE_TOPIC_NAME) + "/compressed", rclcpp::QoS(100));
-    m_compressed_cam_info_publisher =
-      this->create_publisher<sensor_msgs::msg::CameraInfo>(
-      "camera_info", rclcpp::QoS(100));
   }
+
+  // CameraInfo publisher with transient_local durability
+  m_camera_info_publisher =
+    this->create_publisher<sensor_msgs::msg::CameraInfo>(
+    "camera_info", rclcpp::QoS(1).reliable().transient_local());
 
   m_image_msg->header.frame_id = m_parameters.frame_id;
   RCLCPP_INFO(
@@ -250,7 +255,7 @@ void UsbCamNode::get_params()
       "camera_name", "camera_info_url", "frame_id", "framerate", "image_height", "image_width",
       "io_method", "pixel_format", "av_device_format", "video_device", "brightness", "contrast",
       "saturation", "sharpness", "gain", "auto_white_balance", "white_balance", "autoexposure",
-      "exposure", "autofocus", "focus", "skip_device_check"
+      "exposure", "autofocus", "focus", "skip_device_check", "publish_camera_info_once"
     }
   );
 
@@ -263,6 +268,8 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter> & parameters
     if (parameter.get_name() == "camera_name") {
       RCLCPP_INFO(this->get_logger(), "camera_name value: %s", parameter.value_to_string().c_str());
       m_parameters.camera_name = parameter.value_to_string();
+    } else if (parameter.get_name() == "publish_camera_info_once") {
+      m_parameters.publish_camera_info_once = parameter.as_bool();
     } else if (parameter.get_name() == "camera_info_url") {
       m_parameters.camera_info_url = parameter.value_to_string();
     } else if (parameter.get_name() == "frame_id") {
@@ -403,8 +410,10 @@ bool UsbCamNode::take_and_send_image()
   m_image_msg->header.stamp.sec = stamp.tv_sec;
   m_image_msg->header.stamp.nanosec = stamp.tv_nsec;
 
-  *m_camera_info_msg = m_camera_info->getCameraInfo();
-  m_camera_info_msg->header = m_image_msg->header;
+  if (!m_parameters.publish_camera_info_once || !m_camera_info_published) {
+    *m_camera_info_msg = m_camera_info->getCameraInfo();
+    m_camera_info_msg->header = m_image_msg->header;
+  }
   return true;
 }
 
@@ -423,8 +432,10 @@ bool UsbCamNode::take_and_send_image_mjpeg()
   m_compressed_img_msg->header.stamp.sec = stamp.tv_sec;
   m_compressed_img_msg->header.stamp.nanosec = stamp.tv_nsec;
 
-  *m_camera_info_msg = m_camera_info->getCameraInfo();
-  m_camera_info_msg->header = m_compressed_img_msg->header;
+  if (!m_parameters.publish_camera_info_once || !m_camera_info_published) {
+    *m_camera_info_msg = m_camera_info->getCameraInfo();
+    m_camera_info_msg->header = m_compressed_img_msg->header;
+  }
 
   return true;
 }
@@ -436,6 +447,7 @@ rcl_interfaces::msg::SetParametersResult UsbCamNode::parameters_callback(
   m_timer->reset();
   assign_params(parameters);
   set_v4l2_params();
+  m_camera_info_published = false;
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
   result.reason = "success";
@@ -459,11 +471,20 @@ void UsbCamNode::update()
 
 void UsbCamNode::publish()
 {
+  if (!m_parameters.publish_camera_info_once || !m_camera_info_published) {
+    if (m_camera_info_publisher) {
+      m_camera_info_publisher->publish(*m_camera_info_msg);
+      m_camera_info_published = true;
+      RCLCPP_INFO_ONCE(this->get_logger(), "Published CameraInfo once (transient_local).");
+    }
+  }
+
   if (m_parameters.pixel_format_name == "mjpeg") {
-    m_compressed_image_publisher->publish(*m_compressed_img_msg);
-    m_compressed_cam_info_publisher->publish(*m_camera_info_msg);
+    if (m_compressed_image_publisher) {
+      m_compressed_image_publisher->publish(*m_compressed_img_msg);
+    }
   } else {
-    m_image_publisher->publish(*m_image_msg, *m_camera_info_msg);
+    m_image_publisher.publish(*m_image_msg);
   }
 }
 }  // namespace usb_cam

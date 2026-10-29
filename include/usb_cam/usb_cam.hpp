@@ -122,6 +122,8 @@ typedef struct parameters_t
   bool autofocus;
   // When true, UsbCamNode will not validate the device exists in available V4L2 devices
   bool skip_device_check;
+  // When true, CameraInfo is published only once with transient_local durability
+  bool publish_camera_info_once;
 
   parameters_t()
 // *INDENT-OFF*
@@ -146,7 +148,8 @@ typedef struct parameters_t
     auto_white_balance(true),
     autoexposure(true),
     autofocus(false),
-    skip_device_check(false)
+    skip_device_check(false),
+    publish_camera_info_once(true)
   {
   }
 // *INDENT-ON*
