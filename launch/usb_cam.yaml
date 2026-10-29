@@ -1,0 +1,11 @@
+launch:
+- node:
+    pkg: "usb_cam"
+    exec: "usb_cam_node_exe"
+    name: "camera"
+    namespace: ""
+    param:
+    - from: $(find-pkg-share usb_cam)/config/params_1.yaml
+    - name: "frame_id"
+      value: "camera_frame"
+
